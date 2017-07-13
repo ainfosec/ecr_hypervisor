@@ -69,6 +69,8 @@ const hypercall_args_t hypercall_args_table[NR_hypercalls] =
     ARGS(dm_op, 3),
     ARGS(mca, 1),
     ARGS(arch_1, 1),
+    ARGS(vmcs_op, 5),
+    ARGS(vmwrite_2, 2),
 };
 
 #undef COMP

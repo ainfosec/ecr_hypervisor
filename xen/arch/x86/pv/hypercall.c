@@ -81,6 +81,8 @@ static const hypercall_table_t pv_hypercall_table[] = {
     COMPAT_CALL(dm_op),
     HYPERCALL(mca),
     HYPERCALL(arch_1),
+    HYPERCALL(vmcs_op),
+    HYPERCALL(vmwrite_2),
 };
 
 #undef do_arch_1

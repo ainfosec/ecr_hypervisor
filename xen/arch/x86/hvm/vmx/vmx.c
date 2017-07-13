@@ -3876,10 +3876,15 @@ void vmx_vmexit_handler(struct cpu_user_regs *regs)
         __vmread(EXIT_QUALIFICATION, &exit_qualification);
         vmx_invlpg_intercept(exit_qualification);
         break;
+    case EXIT_REASON_RDPMC: // Handle RDPMC exiting, but don't do anything (just a timing increase)
+        update_guest_eip(); /* Safe: RDPMC */
+        break;
     case EXIT_REASON_RDTSCP:
         regs->rcx = hvm_msr_tsc_aux(v);
         /* fall through */
     case EXIT_REASON_RDTSC:
+        if ( rdtsc_alert && printk_ratelimit() )
+            printk("RDTSC occured while rdtsc_alert was set (this is a rate limited message)\n");
         update_guest_eip(); /* Safe: RDTSC, RDTSCP */
         hvm_rdtsc_intercept(regs);
         break;
@@ -4099,6 +4104,14 @@ void vmx_vmexit_handler(struct cpu_user_regs *regs)
         vmx_handle_apic_write();
         break;
 
+    case EXIT_REASON_RDRAND: // Handle RDRAND exiting, but don't do anything (just a timing increase)
+        update_guest_eip(); /* Safe: RDRAND */
+        break;
+
+    case EXIT_REASON_RDSEED: // Handle RDSEED exiting, but don't do anything (just a timing increase)
+        update_guest_eip(); /* Safe: RDSEED */
+        break;
+
     case EXIT_REASON_PML_FULL:
         vmx_vcpu_flush_pml_buffer(v);
         break;
@@ -4117,7 +4130,9 @@ void vmx_vmexit_handler(struct cpu_user_regs *regs)
         break;
 
     case EXIT_REASON_VMX_PREEMPTION_TIMER_EXPIRED:
-    case EXIT_REASON_INVPCID:
+    case EXIT_REASON_INVPCID: // Handle INVPCID exiting, but don't do anything (just a timing increase)
+        update_guest_eip(); /* Safe: INVPCID */
+        break;
     /* fall through */
     default:
     exit_and_crash:

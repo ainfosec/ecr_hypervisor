@@ -20,6 +20,8 @@
 
 #ifndef COMPAT
 
+bool rdtsc_alert;
+
 enum system_state system_state = SYS_STATE_early_boot;
 
 xen_commandline_t saved_cmdline;
@@ -461,6 +463,84 @@ DO(vm_assist)(unsigned int cmd, unsigned int type)
     return vm_assist(current->domain, cmd, type, VM_ASSIST_VALID);
 }
 #endif
+
+/* Begin Custom hypercalls */
+#include <asm/hvm/vmx/vmx.h>
+#include <asm/hvm/vmx/vmcs.h>
+
+DO(vmcs_op)(uint16_t domain_id, unsigned long field, unsigned long value, bool enable, bool rdtsc_alert_flag)
+{
+    struct domain *dom_cur;
+    struct vcpu *vcpu_cur;
+    long unsigned int val;
+    
+    rdtsc_alert = rdtsc_alert_flag;
+
+    printk(XENLOG_INFO "Hypercall (vmcs_op): Inputs (domain_id, field, value): 0x%x, 0x%lx, 0x%lx\n", \
+        domain_id, field, value);
+
+    dom_cur = get_domain_by_id( (domid_t) domain_id );
+    if ( dom_cur == NULL ) {
+        printk(XENLOG_INFO "Domain with ID %u not found.\n", domain_id);
+        return -EINVAL;
+    }
+    // Traverse the VCPU linked list and modify all of of the VCPUs.
+    for_each_vcpu( dom_cur, vcpu_cur ) {
+        vmx_vmcs_enter( vcpu_cur );
+        __vmread(field, &val); // Read the value, to see what it is before we've changed it
+        printk(XENLOG_INFO "Hypercall (vmcs_op): Pre-vmwrite value of field 0x%lx: 0x%lx\n", field, val);
+        switch ( field ) {
+            case CPU_BASED_VM_EXEC_CONTROL:
+                printk(XENLOG_INFO "Hypercall (vmcs_op): Pre-vmwrite exec control value: 0x%x\n", \
+                    vcpu_cur->arch.hvm_vmx.exec_control);
+                if ( enable ) { // Enable or disable
+                    vcpu_cur->arch.hvm_vmx.exec_control |= value;
+                } else {
+                    vcpu_cur->arch.hvm_vmx.exec_control &= ~value;
+                }
+                __vmwrite(field, vcpu_cur->arch.hvm_vmx.exec_control);
+                printk(XENLOG_INFO "Hypercall (vmcs_op): Post-vmwrite exec control value: 0x%x\n", \
+                    vcpu_cur->arch.hvm_vmx.exec_control);
+                break;
+            case SECONDARY_VM_EXEC_CONTROL:
+                printk(XENLOG_INFO "Hypercall (vmcs_op): Pre-vmwrite exec control value: 0x%x\n", \
+                    vcpu_cur->arch.hvm_vmx.exec_control);
+                printk(XENLOG_INFO "Hypercall (vmcs_op): Pre-vmwrite secondary exec control value: 0x%x\n", \
+                    vcpu_cur->arch.hvm_vmx.secondary_exec_control);
+                vcpu_cur->arch.hvm_vmx.exec_control |= CPU_BASED_ACTIVATE_SECONDARY_CONTROLS;
+                __vmwrite(CPU_BASED_VM_EXEC_CONTROL, vcpu_cur->arch.hvm_vmx.exec_control);
+                printk(XENLOG_INFO "Hypercall (vmcs_op): Post-vmwrite exec control value: 0x%x\n", \
+                    vcpu_cur->arch.hvm_vmx.exec_control);
+                vcpu_cur->arch.hvm_vmx.secondary_exec_control |= value;
+                if ( enable ) { // Enable or disable
+                    vcpu_cur->arch.hvm_vmx.secondary_exec_control |= value;
+                } else {
+                    vcpu_cur->arch.hvm_vmx.secondary_exec_control &= ~value;
+                }
+                __vmwrite(field, vcpu_cur->arch.hvm_vmx.secondary_exec_control);
+                printk(XENLOG_INFO "Hypercall (vmcs_op): Post-vmwrite secondary exec control value: 0x%x\n", \
+                    vcpu_cur->arch.hvm_vmx.secondary_exec_control);
+                break;
+            default:
+                printk(XENLOG_INFO "Unknown field type\n");
+                break;
+        }
+        __vmread(field, &val); // Read the value, to see what it is after we've changed it
+        vmx_vmcs_exit( vcpu_cur );
+        printk(XENLOG_INFO "Hypercall (vmcs_op): Post-vmwrite value of field 0x%lx: 0x%lx\n", field, val);
+        printk(XENLOG_INFO "Hypercall (vmcs_op): Finished operation on VCPU ID %d\n", vcpu_cur->vcpu_id);
+    }
+    return 1;
+}
+
+DO(vmwrite_2)(unsigned int op1, unsigned int op2)
+{
+    printk(XENLOG_INFO "vmwrite_2 called\n");
+    printk(XENLOG_INFO "Inputs (op1, op2): %u, %u\n", op1, op2);
+    return 1;
+}
+
+/* End Custom hypercalls */
 
 /*
  * Local variables:

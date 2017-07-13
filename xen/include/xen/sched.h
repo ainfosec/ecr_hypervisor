@@ -904,6 +904,8 @@ extern void dump_runq(unsigned char key);
 
 void arch_do_physinfo(xen_sysctl_physinfo_t *pi);
 
+extern bool rdtsc_alert; // Flag any exiting of RDTSC when enabled
+
 #endif /* __SCHED_H__ */
 
 /*
