@@ -1,0 +1,10 @@
+
+config VIDEO
+	bool
+
+config VGA
+	bool
+	select VIDEO
+
+config HAS_ARM_HDLCD
+	bool

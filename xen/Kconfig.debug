@@ -1,0 +1,119 @@
+
+menu "Debugging Options"
+
+config DEBUG
+	bool "Developer Checks"
+	default y
+	---help---
+	  If you say Y here this will enable developer checks such as asserts
+	  and extra printks. This option is intended for development purposes
+	  only, and not for production use.
+
+	  You probably want to say 'N' here.
+
+if DEBUG || EXPERT = "y"
+
+config CRASH_DEBUG
+	bool "Crash Debugging Support"
+	depends on X86
+	---help---
+	  If you want to attach gdb to Xen to debug Xen if it crashes
+	  then say Y.
+
+config FRAME_POINTER
+	bool "Compile Xen with frame pointers"
+	default DEBUG
+	---help---
+	  If you say Y here the resulting Xen will be slightly larger and
+	  maybe slower, but it gives very useful debugging information
+	  in case of any Xen bugs.
+
+config GCOV
+	bool "Gcov Support"
+	depends on !LIVEPATCH
+	select SUPPRESS_DUPLICATE_SYMBOL_WARNINGS
+	---help---
+	  Enable gcov (a test coverage program in GCC) support.
+
+	  If unsure, say N here.
+
+choice
+	prompt "Specify Gcov format"
+	depends on GCOV
+	default GCOV_FORMAT_AUTODETECT
+	---help---
+	  The gcov format is determined by gcc version.
+
+	  If unsure, choose "Autodetect".
+
+config GCOV_FORMAT_AUTODETECT
+	bool "Autodetect"
+	---help---
+	  Automatically select gcov format based on gcc version.
+
+config GCOV_FORMAT_5
+	bool "GCC 5 format"
+	---help---
+	  Select this option to use the format specified in GCC 5.
+	  Works in gcc version range [5, ...).
+
+config GCOV_FORMAT_4_9
+	bool "GCC 4.9 format"
+	---help---
+	  Select this option to use the format specified in GCC 4.9.
+	  Works in gcc version range [4.9, 5).
+
+config GCOV_FORMAT_4_7
+	bool "GCC 4.7 format"
+	---help---
+	  Select this option to use the format specified in GCC 4.7.
+	  Works in gcc version range [4.7, 4.9).
+
+config GCOV_FORMAT_3_4
+	bool "GCC 3.4 format"
+	---help---
+	  Select this option to use the format specified in GCC 3.4.
+	  Works in gcc version range [3.4, 4.7).
+
+endchoice
+
+config LOCK_PROFILE
+	bool "Lock Profiling"
+	---help---
+	  Lock profiling allows you to see how often locks are taken and blocked.
+	  You can use serial console to print (and reset) using 'l' and 'L'
+	  respectively, or the 'xenlockprof' tool.
+
+config PERF_COUNTERS
+	bool "Performance Counters"
+	---help---
+	  Enables software performance counters that allows you to analyze
+	  bottlenecks in the system.  To access this data you can use serial
+	  console to print (and reset) using 'p' and 'P' respectively, or
+	  the 'xenperf' tool.
+
+config PERF_ARRAYS
+	bool "Performance Counter Array Histograms"
+	depends on PERF_COUNTERS
+	---help---
+	  Enables software performance counter array histograms.
+
+
+config VERBOSE_DEBUG
+	bool "Verbose debug messages"
+	default DEBUG
+	---help---
+	  Guest output from HYPERVISOR_console_io and hypervisor parsing
+	  ELF images (dom0) will be logged in the Xen ring buffer.
+
+config DEVICE_TREE_DEBUG
+	bool "Device tree debug messages"
+	depends on HAS_DEVICE_TREE
+	---help---
+	  Device tree parsing and DOM0 device tree building messages are
+	  logged in the Xen ring buffer.
+	  If unsure, say N here.
+
+endif # DEBUG || EXPERT
+
+endmenu
