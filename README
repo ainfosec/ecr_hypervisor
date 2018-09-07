@@ -1,3 +1,5 @@
+NOTE: This version of Xen 4.10-unstable has been modified to accomodate introspection capabilities as part of the ECR project. Please see the README.xen_install file under https://github.com/ainfosec/ecr_toolkit for detailed instructions on installation.
+
 #################################
 __  __            _  _    _  ___                        _        _     _
 \ \/ /___ _ __   | || |  / |/ _ \       _   _ _ __  ___| |_ __ _| |__ | | ___
