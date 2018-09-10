@@ -1,0 +1,3 @@
+[submodule "xenbits"]
+	path = xenbits
+	url = https://xenbits.xen.org/git-http/xen.git

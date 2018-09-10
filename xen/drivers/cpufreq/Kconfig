@@ -1,3 +1,0 @@
-
-config HAS_CPUFREQ
-	bool

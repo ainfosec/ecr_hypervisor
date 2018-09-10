@@ -1,0 +1,511 @@
+diff --git a/xen/arch/arm/gic-v3-its.c b/xen/arch/arm/gic-v3-its.c
+index 3d863cd75f..2d36030c01 100644
+--- a/xen/arch/arm/gic-v3-its.c
++++ b/xen/arch/arm/gic-v3-its.c
+@@ -20,6 +20,7 @@
+ 
+ #include <xen/lib.h>
+ #include <xen/delay.h>
++#include <xen/libfdt/libfdt.h>
+ #include <xen/mm.h>
+ #include <xen/rbtree.h>
+ #include <xen/sched.h>
+@@ -903,6 +904,78 @@ struct pending_irq *gicv3_assign_guest_event(struct domain *d,
+     return pirq;
+ }
+ 
++/*
++ * Create the respective guest DT nodes from a list of host ITSes.
++ * This copies the reg property, so the guest sees the ITS at the same address
++ * as the host.
++ */
++int gicv3_its_make_hwdom_dt_nodes(const struct domain *d,
++                                  const struct dt_device_node *gic,
++                                  void *fdt)
++{
++    uint32_t len;
++    int res;
++    const void *prop = NULL;
++    const struct dt_device_node *its = NULL;
++    const struct host_its *its_data;
++
++    if ( list_empty(&host_its_list) )
++        return 0;
++
++    /* The sub-nodes require the ranges property */
++    prop = dt_get_property(gic, "ranges", &len);
++    if ( !prop )
++    {
++        printk(XENLOG_ERR "Can't find ranges property for the gic node\n");
++        return -FDT_ERR_XEN(ENOENT);
++    }
++
++    res = fdt_property(fdt, "ranges", prop, len);
++    if ( res )
++        return res;
++
++    list_for_each_entry(its_data, &host_its_list, entry)
++    {
++        its = its_data->dt_node;
++
++        res = fdt_begin_node(fdt, its->name);
++        if ( res )
++            return res;
++
++        res = fdt_property_string(fdt, "compatible", "arm,gic-v3-its");
++        if ( res )
++            return res;
++
++        res = fdt_property(fdt, "msi-controller", NULL, 0);
++        if ( res )
++            return res;
++
++        if ( its->phandle )
++        {
++            res = fdt_property_cell(fdt, "phandle", its->phandle);
++            if ( res )
++                return res;
++        }
++
++        /* Use the same reg regions as the ITS node in host DTB. */
++        prop = dt_get_property(its, "reg", &len);
++        if ( !prop )
++        {
++            printk(XENLOG_ERR "GICv3: Can't find ITS reg property.\n");
++            res = -FDT_ERR_XEN(ENOENT);
++            return res;
++        }
++
++        res = fdt_property(fdt, "reg", prop, len);
++        if ( res )
++            return res;
++
++        fdt_end_node(fdt);
++    }
++
++    return res;
++}
++
+ /* Scan the DT for any ITS nodes and create a list of host ITSes out of it. */
+ void gicv3_its_dt_init(const struct dt_device_node *node)
+ {
+diff --git a/xen/arch/arm/gic-v3.c b/xen/arch/arm/gic-v3.c
+index d539d6c85d..c927306eae 100644
+--- a/xen/arch/arm/gic-v3.c
++++ b/xen/arch/arm/gic-v3.c
+@@ -1172,8 +1172,10 @@ static int gicv3_make_hwdom_dt_node(const struct domain *d,
+ 
+     res = fdt_property(fdt, "reg", new_cells, len);
+     xfree(new_cells);
++    if ( res )
++        return res;
+ 
+-    return res;
++    return gicv3_its_make_hwdom_dt_nodes(d, gic, fdt);
+ }
+ 
+ static const hw_irq_controller gicv3_host_irq_type = {
+diff --git a/xen/arch/arm/vgic-v3-its.c b/xen/arch/arm/vgic-v3-its.c
+index 335272fd92..bfc5acc88a 100644
+--- a/xen/arch/arm/vgic-v3-its.c
++++ b/xen/arch/arm/vgic-v3-its.c
+@@ -52,6 +52,7 @@
+  */
+ struct virt_its {
+     struct domain *d;
++    struct list_head vits_list;
+     paddr_t doorbell_address;
+     unsigned int devid_bits;
+     unsigned int evid_bits;
+@@ -1454,6 +1455,46 @@ static const struct mmio_handler_ops vgic_its_mmio_handler = {
+     .write = vgic_v3_its_mmio_write,
+ };
+ 
++static int vgic_v3_its_init_virtual(struct domain *d, paddr_t guest_addr,
++                                    unsigned int devid_bits,
++                                    unsigned int evid_bits)
++{
++    struct virt_its *its;
++    uint64_t base_attr;
++
++    its = xzalloc(struct virt_its);
++    if ( !its )
++        return -ENOMEM;
++
++    base_attr  = GIC_BASER_InnerShareable << GITS_BASER_SHAREABILITY_SHIFT;
++    base_attr |= GIC_BASER_CACHE_SameAsInner << GITS_BASER_OUTER_CACHEABILITY_SHIFT;
++    base_attr |= GIC_BASER_CACHE_RaWaWb << GITS_BASER_INNER_CACHEABILITY_SHIFT;
++
++    its->cbaser  = base_attr;
++    base_attr |= 0ULL << GITS_BASER_PAGE_SIZE_SHIFT;    /* 4K pages */
++    its->baser_dev = GITS_BASER_TYPE_DEVICE << GITS_BASER_TYPE_SHIFT;
++    its->baser_dev |= (sizeof(dev_table_entry_t) - 1) <<
++                      GITS_BASER_ENTRY_SIZE_SHIFT;
++    its->baser_dev |= base_attr;
++    its->baser_coll  = GITS_BASER_TYPE_COLLECTION << GITS_BASER_TYPE_SHIFT;
++    its->baser_coll |= (sizeof(coll_table_entry_t) - 1) <<
++                       GITS_BASER_ENTRY_SIZE_SHIFT;
++    its->baser_coll |= base_attr;
++    its->d = d;
++    its->doorbell_address = guest_addr + ITS_DOORBELL_OFFSET;
++    its->devid_bits = devid_bits;
++    its->evid_bits = evid_bits;
++    spin_lock_init(&its->vcmd_lock);
++    spin_lock_init(&its->its_lock);
++
++    register_mmio_handler(d, &vgic_its_mmio_handler, guest_addr, SZ_64K, its);
++
++    /* Register the virtual ITS to be able to clean it up later. */
++    list_add_tail(&its->vits_list, &d->arch.vgic.vits_list);
++
++    return 0;
++}
++
+ unsigned int vgic_v3_its_count(const struct domain *d)
+ {
+     struct host_its *hw_its;
+@@ -1469,16 +1510,52 @@ unsigned int vgic_v3_its_count(const struct domain *d)
+     return ret;
+ }
+ 
++/*
++ * For a hardware domain, this will iterate over the host ITSes
++ * and map one virtual ITS per host ITS at the same address.
++ */
+ int vgic_v3_its_init_domain(struct domain *d)
+ {
++    int ret;
++
++    INIT_LIST_HEAD(&d->arch.vgic.vits_list);
+     spin_lock_init(&d->arch.vgic.its_devices_lock);
+     d->arch.vgic.its_devices = RB_ROOT;
+ 
++    if ( is_hardware_domain(d) )
++    {
++        struct host_its *hw_its;
++
++        list_for_each_entry(hw_its, &host_its_list, entry)
++        {
++            /*
++             * For each host ITS create a virtual ITS using the same
++             * base and thus doorbell address.
++             * Use the same number of device ID and event ID bits as the host.
++             */
++            ret = vgic_v3_its_init_virtual(d, hw_its->addr,
++                                           hw_its->devid_bits,
++                                           hw_its->evid_bits);
++            if ( ret )
++                return ret;
++            else
++                d->arch.vgic.has_its = true;
++        }
++    }
++
+     return 0;
+ }
+ 
+ void vgic_v3_its_free_domain(struct domain *d)
+ {
++    struct virt_its *pos, *temp;
++
++    list_for_each_entry_safe( pos, temp, &d->arch.vgic.vits_list, vits_list )
++    {
++        list_del(&pos->vits_list);
++        xfree(pos);
++    }
++
+     ASSERT(RB_EMPTY_ROOT(&d->arch.vgic.its_devices));
+ }
+ 
+diff --git a/xen/arch/x86/hvm/hypercall.c b/xen/arch/x86/hvm/hypercall.c
+index e7238ce293..00f125f43a 100644
+--- a/xen/arch/x86/hvm/hypercall.c
++++ b/xen/arch/x86/hvm/hypercall.c
+@@ -132,7 +132,9 @@ static const hypercall_table_t hvm_hypercall_table[] = {
+     COMPAT_CALL(mmuext_op),
+     HYPERCALL(xenpmu_op),
+     COMPAT_CALL(dm_op),
+-    HYPERCALL(arch_1)
++    HYPERCALL(arch_1),
++    HYPERCALL(vmcs_op),
++    HYPERCALL(vmwrite_2),
+ };
+ 
+ #undef do_arch_1
+diff --git a/xen/arch/x86/hvm/vmx/vmx.c b/xen/arch/x86/hvm/vmx/vmx.c
+index c53b24955a..2ca1ba233d 100644
+--- a/xen/arch/x86/hvm/vmx/vmx.c
++++ b/xen/arch/x86/hvm/vmx/vmx.c
+@@ -3876,10 +3876,15 @@ void vmx_vmexit_handler(struct cpu_user_regs *regs)
+         __vmread(EXIT_QUALIFICATION, &exit_qualification);
+         vmx_invlpg_intercept(exit_qualification);
+         break;
++    case EXIT_REASON_RDPMC: // Handle RDPMC exiting, but don't do anything (just a timing increase)
++        update_guest_eip(); /* Safe: RDPMC */
++        break;
+     case EXIT_REASON_RDTSCP:
+         regs->rcx = hvm_msr_tsc_aux(v);
+         /* fall through */
+     case EXIT_REASON_RDTSC:
++        if ( rdtsc_alert && printk_ratelimit() )
++            printk("RDTSC occured while rdtsc_alert was set (this is a rate limited message)\n");
+         update_guest_eip(); /* Safe: RDTSC, RDTSCP */
+         hvm_rdtsc_intercept(regs);
+         break;
+@@ -4099,6 +4104,14 @@ void vmx_vmexit_handler(struct cpu_user_regs *regs)
+         vmx_handle_apic_write();
+         break;
+ 
++    case EXIT_REASON_RDRAND: // Handle RDRAND exiting, but don't do anything (just a timing increase)
++        update_guest_eip(); /* Safe: RDRAND */
++        break;
++
++    case EXIT_REASON_RDSEED: // Handle RDSEED exiting, but don't do anything (just a timing increase)
++        update_guest_eip(); /* Safe: RDSEED */
++        break;
++
+     case EXIT_REASON_PML_FULL:
+         vmx_vcpu_flush_pml_buffer(v);
+         break;
+@@ -4117,7 +4130,9 @@ void vmx_vmexit_handler(struct cpu_user_regs *regs)
+         break;
+ 
+     case EXIT_REASON_VMX_PREEMPTION_TIMER_EXPIRED:
+-    case EXIT_REASON_INVPCID:
++    case EXIT_REASON_INVPCID: // Handle INVPCID exiting, but don't do anything (just a timing increase)
++        update_guest_eip(); /* Safe: INVPCID */
++        break;
+     /* fall through */
+     default:
+     exit_and_crash:
+diff --git a/xen/arch/x86/hypercall.c b/xen/arch/x86/hypercall.c
+index e30181817a..bee540cbea 100644
+--- a/xen/arch/x86/hypercall.c
++++ b/xen/arch/x86/hypercall.c
+@@ -69,6 +69,8 @@ const hypercall_args_t hypercall_args_table[NR_hypercalls] =
+     ARGS(dm_op, 3),
+     ARGS(mca, 1),
+     ARGS(arch_1, 1),
++    ARGS(vmcs_op, 5),
++    ARGS(vmwrite_2, 2),
+ };
+ 
+ #undef COMP
+diff --git a/xen/arch/x86/pv/hypercall.c b/xen/arch/x86/pv/hypercall.c
+index 7c5e5a629d..cc10aa588a 100644
+--- a/xen/arch/x86/pv/hypercall.c
++++ b/xen/arch/x86/pv/hypercall.c
+@@ -81,6 +81,8 @@ static const hypercall_table_t pv_hypercall_table[] = {
+     COMPAT_CALL(dm_op),
+     HYPERCALL(mca),
+     HYPERCALL(arch_1),
++    HYPERCALL(vmcs_op),
++    HYPERCALL(vmwrite_2),
+ };
+ 
+ #undef do_arch_1
+diff --git a/xen/common/kernel.c b/xen/common/kernel.c
+index e1ebb0b412..88b64c1c2f 100644
+--- a/xen/common/kernel.c
++++ b/xen/common/kernel.c
+@@ -20,6 +20,8 @@
+ 
+ #ifndef COMPAT
+ 
++bool rdtsc_alert;
++
+ enum system_state system_state = SYS_STATE_early_boot;
+ 
+ xen_commandline_t saved_cmdline;
+@@ -462,6 +464,84 @@ DO(vm_assist)(unsigned int cmd, unsigned int type)
+ }
+ #endif
+ 
++/* Begin Custom hypercalls */
++#include <asm/hvm/vmx/vmx.h>
++#include <asm/hvm/vmx/vmcs.h>
++
++DO(vmcs_op)(uint16_t domain_id, unsigned long field, unsigned long value, bool enable, bool rdtsc_alert_flag)
++{
++    struct domain *dom_cur;
++    struct vcpu *vcpu_cur;
++    long unsigned int val;
++    
++    rdtsc_alert = rdtsc_alert_flag;
++
++    printk(XENLOG_INFO "Hypercall (vmcs_op): Inputs (domain_id, field, value): 0x%x, 0x%lx, 0x%lx\n", \
++        domain_id, field, value);
++
++    dom_cur = get_domain_by_id( (domid_t) domain_id );
++    if ( dom_cur == NULL ) {
++        printk(XENLOG_INFO "Domain with ID %u not found.\n", domain_id);
++        return -EINVAL;
++    }
++    // Traverse the VCPU linked list and modify all of of the VCPUs.
++    for_each_vcpu( dom_cur, vcpu_cur ) {
++        vmx_vmcs_enter( vcpu_cur );
++        __vmread(field, &val); // Read the value, to see what it is before we've changed it
++        printk(XENLOG_INFO "Hypercall (vmcs_op): Pre-vmwrite value of field 0x%lx: 0x%lx\n", field, val);
++        switch ( field ) {
++            case CPU_BASED_VM_EXEC_CONTROL:
++                printk(XENLOG_INFO "Hypercall (vmcs_op): Pre-vmwrite exec control value: 0x%x\n", \
++                    vcpu_cur->arch.hvm_vmx.exec_control);
++                if ( enable ) { // Enable or disable
++                    vcpu_cur->arch.hvm_vmx.exec_control |= value;
++                } else {
++                    vcpu_cur->arch.hvm_vmx.exec_control &= ~value;
++                }
++                __vmwrite(field, vcpu_cur->arch.hvm_vmx.exec_control);
++                printk(XENLOG_INFO "Hypercall (vmcs_op): Post-vmwrite exec control value: 0x%x\n", \
++                    vcpu_cur->arch.hvm_vmx.exec_control);
++                break;
++            case SECONDARY_VM_EXEC_CONTROL:
++                printk(XENLOG_INFO "Hypercall (vmcs_op): Pre-vmwrite exec control value: 0x%x\n", \
++                    vcpu_cur->arch.hvm_vmx.exec_control);
++                printk(XENLOG_INFO "Hypercall (vmcs_op): Pre-vmwrite secondary exec control value: 0x%x\n", \
++                    vcpu_cur->arch.hvm_vmx.secondary_exec_control);
++                vcpu_cur->arch.hvm_vmx.exec_control |= CPU_BASED_ACTIVATE_SECONDARY_CONTROLS;
++                __vmwrite(CPU_BASED_VM_EXEC_CONTROL, vcpu_cur->arch.hvm_vmx.exec_control);
++                printk(XENLOG_INFO "Hypercall (vmcs_op): Post-vmwrite exec control value: 0x%x\n", \
++                    vcpu_cur->arch.hvm_vmx.exec_control);
++                vcpu_cur->arch.hvm_vmx.secondary_exec_control |= value;
++                if ( enable ) { // Enable or disable
++                    vcpu_cur->arch.hvm_vmx.secondary_exec_control |= value;
++                } else {
++                    vcpu_cur->arch.hvm_vmx.secondary_exec_control &= ~value;
++                }
++                __vmwrite(field, vcpu_cur->arch.hvm_vmx.secondary_exec_control);
++                printk(XENLOG_INFO "Hypercall (vmcs_op): Post-vmwrite secondary exec control value: 0x%x\n", \
++                    vcpu_cur->arch.hvm_vmx.secondary_exec_control);
++                break;
++            default:
++                printk(XENLOG_INFO "Unknown field type\n");
++                break;
++        }
++        __vmread(field, &val); // Read the value, to see what it is after we've changed it
++        vmx_vmcs_exit( vcpu_cur );
++        printk(XENLOG_INFO "Hypercall (vmcs_op): Post-vmwrite value of field 0x%lx: 0x%lx\n", field, val);
++        printk(XENLOG_INFO "Hypercall (vmcs_op): Finished operation on VCPU ID %d\n", vcpu_cur->vcpu_id);
++    }
++    return 1;
++}
++
++DO(vmwrite_2)(unsigned int op1, unsigned int op2)
++{
++    printk(XENLOG_INFO "vmwrite_2 called\n");
++    printk(XENLOG_INFO "Inputs (op1, op2): %u, %u\n", op1, op2);
++    return 1;
++}
++
++/* End Custom hypercalls */
++
+ /*
+  * Local variables:
+  * mode: C
+diff --git a/xen/include/asm-arm/domain.h b/xen/include/asm-arm/domain.h
+index b33f54aa22..8dfc1d1ec2 100644
+--- a/xen/include/asm-arm/domain.h
++++ b/xen/include/asm-arm/domain.h
+@@ -115,6 +115,7 @@ struct arch_domain
+         spinlock_t its_devices_lock;        /* Protects the its_devices tree */
+         struct radix_tree_root pend_lpi_tree; /* Stores struct pending_irq's */
+         rwlock_t pend_lpi_tree_lock;        /* Protects the pend_lpi_tree */
++        struct list_head vits_list;         /* List of virtual ITSes */
+         unsigned int intid_bits;
+         /*
+          * TODO: if there are more bool's being added below, consider
+diff --git a/xen/include/asm-arm/gic_v3_its.h b/xen/include/asm-arm/gic_v3_its.h
+index 459b6fed8e..1fac1c7f26 100644
+--- a/xen/include/asm-arm/gic_v3_its.h
++++ b/xen/include/asm-arm/gic_v3_its.h
+@@ -158,6 +158,11 @@ int gicv3_its_setup_collection(unsigned int cpu);
+ int vgic_v3_its_init_domain(struct domain *d);
+ void vgic_v3_its_free_domain(struct domain *d);
+ 
++/* Create the appropriate DT nodes for a hardware domain. */
++int gicv3_its_make_hwdom_dt_nodes(const struct domain *d,
++                                  const struct dt_device_node *gic,
++                                  void *fdt);
++
+ /*
+  * Map a device on the host by allocating an ITT on the host (ITS).
+  * "nr_event" specifies how many events (interrupts) this device will need.
+@@ -242,6 +247,13 @@ static inline void vgic_v3_its_free_domain(struct domain *d)
+ {
+ }
+ 
++static inline int gicv3_its_make_hwdom_dt_nodes(const struct domain *d,
++                                                const struct dt_device_node *gic,
++                                                void *fdt)
++{
++    return 0;
++}
++
+ #endif /* CONFIG_HAS_ITS */
+ 
+ #endif
+diff --git a/xen/include/asm-x86/hvm/vmx/vmx.h b/xen/include/asm-x86/hvm/vmx/vmx.h
+index 4889a64255..a855dd70ec 100644
+--- a/xen/include/asm-x86/hvm/vmx/vmx.h
++++ b/xen/include/asm-x86/hvm/vmx/vmx.h
+@@ -208,8 +208,10 @@ static inline void pi_clear_sn(struct pi_desc *pi_desc)
+ #define EXIT_REASON_WBINVD              54
+ #define EXIT_REASON_XSETBV              55
+ #define EXIT_REASON_APIC_WRITE          56
++#define EXIT_REASON_RDRAND              57
+ #define EXIT_REASON_INVPCID             58
+ #define EXIT_REASON_VMFUNC              59
++#define EXIT_REASON_RDSEED              61
+ #define EXIT_REASON_PML_FULL            62
+ #define EXIT_REASON_XSAVES              63
+ #define EXIT_REASON_XRSTORS             64
+diff --git a/xen/include/public/xen.h b/xen/include/public/xen.h
+index 2ac6b1e24d..bd2a614ea8 100644
+--- a/xen/include/public/xen.h
++++ b/xen/include/public/xen.h
+@@ -121,6 +121,8 @@ DEFINE_XEN_GUEST_HANDLE(xen_ulong_t);
+ #define __HYPERVISOR_xc_reserved_op       39 /* reserved for XenClient */
+ #define __HYPERVISOR_xenpmu_op            40
+ #define __HYPERVISOR_dm_op                41
++#define __HYPERVISOR_vmcs_op              42
++#define __HYPERVISOR_vmwrite_2            43
+ 
+ /* Architecture-specific hypercall definitions. */
+ #define __HYPERVISOR_arch_0               48
+diff --git a/xen/include/xen/hypercall.h b/xen/include/xen/hypercall.h
+index cc99aea57d..5e566686ee 100644
+--- a/xen/include/xen/hypercall.h
++++ b/xen/include/xen/hypercall.h
+@@ -148,6 +148,19 @@ do_dm_op(
+     unsigned int nr_bufs,
+     XEN_GUEST_HANDLE_PARAM(xen_dm_op_buf_t) bufs);
+ 
++extern long
++do_vmcs_op(
++    uint16_t domain_id,
++    unsigned long field,
++    unsigned long value,
++    bool enable,
++    bool rdtsc_alert_flag);
++
++extern long
++do_vmwrite_2(
++    unsigned int op1,
++    unsigned int op2);
++
+ #ifdef CONFIG_COMPAT
+ 
+ extern int
+diff --git a/xen/include/xen/sched.h b/xen/include/xen/sched.h
+index 1127ca99bd..995ab6ffeb 100644
+--- a/xen/include/xen/sched.h
++++ b/xen/include/xen/sched.h
+@@ -904,6 +904,8 @@ extern void dump_runq(unsigned char key);
+ 
+ void arch_do_physinfo(xen_sysctl_physinfo_t *pi);
+ 
++extern bool rdtsc_alert; // Flag any exiting of RDTSC when enabled
++
+ #endif /* __SCHED_H__ */
+ 
+ /*
